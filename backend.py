@@ -18,7 +18,7 @@ except ImportError:
 
 # --- Main Backend Logic ---
 
-API_KEY = "AIzaSyChTwwV35aKsV56cC8DhiWfcNrdd8Eh1_g" # Make sure your key is pasted here
+API_KEY = "" # Make sure your key is pasted here
 
 def call_ai_service(prompt, style, count):
     if not genai:
