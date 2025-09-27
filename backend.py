@@ -1,4 +1,4 @@
-# backend.py - Improved version with actual asset loading
+# backend.py - Enhanced with robust asset loading
 
 import bpy
 import random
@@ -60,7 +60,7 @@ def call_ai_service(prompt, style, count):
 
 
 def call_ai_service_with_assets(prompt, style, count, available_assets):
-    """Enhanced AI service call that uses asset intelligence."""
+    """Enhanced AI service call that uses asset intelligence with ID-based selection."""
     if not genai:
         print("Google Generative AI library not found. Using asset-aware mock data.")
         return generate_asset_aware_mock_data(available_assets, count)
@@ -85,6 +85,7 @@ def call_ai_service_with_assets(prompt, style, count, available_assets):
         asset_info = []
         for asset in filtered_assets[:30]:  # Limit to first 30 good assets
             asset_info.append({
+                'id': asset['id'],  # Include asset ID for robust lookup
                 'name': asset['name'],
                 'category': asset['category'],
                 'quality': asset['quality_tier'],
@@ -101,7 +102,7 @@ def call_ai_service_with_assets(prompt, style, count, available_assets):
             "REQUIRED OUTPUT FORMAT:\n"
             "{\n"
             '  "locations": [[X, Y, Z], [X, Y, Z], ...],\n'
-            '  "selected_assets": ["asset_name_1", "asset_name_2", ...],\n'
+            '  "selected_asset_ids": [123, 456, 789, ...],\n'
             '  "reasoning": "Brief explanation of asset choices and layout"\n'
             "}\n"
             "\n"
@@ -114,22 +115,21 @@ def call_ai_service_with_assets(prompt, style, count, available_assets):
             f"- Number of Objects: {count}\n"
             "\n"
             "INSTRUCTIONS:\n"
-            "1. Select ONLY from the available assets listed above\n"
+            "1. Select ONLY from the available assets listed above using their ID numbers\n"
             "2. Choose assets that make sense for the scene (avoid character controls, rigs, etc.)\n"
             "3. Create realistic 3D coordinates for each selected asset\n"
             "4. Consider asset complexity for proper spacing\n"
             "5. Ensure the layout makes sense for the requested scene type\n"
             "6. Z coordinates should be appropriate (ground objects = 0, elevated objects higher)\n"
             "7. Focus on vehicles, props, lighting, and architecture assets\n"
-            "\n"
-            "Avoid selecting assets with names containing: 'cs_', 'ctrl', 'ik_', 'bone', 'rig'"
+            "8. Return asset IDs in selected_asset_ids array, not names\n"
         )
         
         response = model.generate_content(full_prompt, generation_config=generation_config)
         
-        print("--- Enhanced AI Response with Assets ---")
+        print("--- Enhanced AI Response with Asset IDs ---")
         print(response.text)
-        print("----------------------------------------")
+        print("-------------------------------------------")
         
         ai_response = json.loads(response.text)
         
@@ -137,40 +137,38 @@ def call_ai_service_with_assets(prompt, style, count, available_assets):
         if 'locations' not in ai_response:
             raise ValueError("AI response missing 'locations' key")
         
-        if 'selected_assets' not in ai_response:
-            ai_response['selected_assets'] = [f"asset_{i}" for i in range(len(ai_response['locations']))]
+        # Convert asset IDs to asset data for backward compatibility
+        selected_asset_ids = ai_response.get('selected_asset_ids', [])
+        selected_assets = []
         
-        # Ensure we have the right number of objects and valid asset names
-        locations = ai_response['locations']
-        selected_assets = ai_response['selected_assets']
+        # Create ID lookup map for fast access
+        asset_id_map = {asset['id']: asset for asset in filtered_assets}
         
-        # Validate selected assets exist in our database
-        asset_names = {asset['name'] for asset in filtered_assets}
-        validated_assets = []
-        
-        for asset_name in selected_assets:
-            if asset_name in asset_names:
-                validated_assets.append(asset_name)
+        for asset_id in selected_asset_ids:
+            if asset_id in asset_id_map:
+                selected_assets.append(asset_id_map[asset_id])
             else:
-                # Find a replacement from filtered assets
-                replacement = random.choice(filtered_assets)['name']
-                validated_assets.append(replacement)
-                print(f"Replaced invalid asset '{asset_name}' with '{replacement}'")
+                # If AI provided invalid ID, select a random valid asset
+                replacement = random.choice(filtered_assets)
+                selected_assets.append(replacement)
+                print(f"Replaced invalid asset ID {asset_id} with {replacement['name']} (ID: {replacement['id']})")
         
-        # Pad or trim to match requested count
-        while len(locations) < count or len(validated_assets) < count:
-            # Add more locations with random selection from filtered assets
-            random_asset = random.choice(filtered_assets)
+        # Ensure we have enough assets
+        while len(selected_assets) < count:
+            selected_assets.append(random.choice(filtered_assets))
+        
+        # Ensure locations and assets match in count
+        locations = ai_response['locations']
+        while len(locations) < count:
             locations.append([
                 random.uniform(-10, 10),
                 random.uniform(-10, 10),
                 0.0
             ])
-            validated_assets.append(random_asset['name'])
         
-        # Trim if too many
+        # Trim to exact count
         ai_response['locations'] = locations[:count]
-        ai_response['selected_assets'] = validated_assets[:count]
+        ai_response['selected_assets'] = selected_assets[:count]  # Full asset data, not just IDs
         
         return ai_response
         
@@ -192,26 +190,62 @@ def filter_visual_assets(available_assets):
         'arm_toon', 'arm_scale'
     ]
     
-    for asset in available_assets:
+    print(f"DEBUG: Filtering {len(available_assets)} assets...")
+    
+    for i, asset in enumerate(available_assets):
         asset_name = asset['name'].lower()
+        skip_reasons = []
         
         # Skip if name contains exclude keywords
         if any(keyword in asset_name for keyword in exclude_keywords):
-            continue
+            skip_reasons.append("contains exclude keywords")
         
         # Skip if it has zero polygons (likely a control object)
-        if asset.get('polygon_count', 0) <= 0:
-            continue
+        polygon_count = asset.get('polygon_count', 0)
+        if polygon_count <= 0:
+            skip_reasons.append(f"zero polygons ({polygon_count})")
         
         # Skip if dimensions are all zero
-        if (asset.get('width', 0) == 0 and 
-            asset.get('height', 0) == 0 and 
-            asset.get('depth', 0) == 0):
-            continue
+        dimensions = asset.get('dimensions', [0, 0, 0])
+        if isinstance(dimensions, list) and len(dimensions) >= 3:
+            width, height, depth = dimensions[:3]
+        else:
+            width = asset.get('width', 0)
+            height = asset.get('height', 0) 
+            depth = asset.get('depth', 0)
         
+        if width == 0 and height == 0 and depth == 0:
+            skip_reasons.append(f"zero dimensions ({width}, {height}, {depth})")
+        
+        # Debug first few assets
+        if i < 5:
+            print(f"  Asset {i}: '{asset['name']}' - polygons: {polygon_count}, dimensions: {dimensions}")
+            if skip_reasons:
+                print(f"    SKIPPED: {', '.join(skip_reasons)}")
+            else:
+                print(f"    INCLUDED")
+        
+        # Only skip if we have skip reasons
+        if skip_reasons:
+            continue
+            
         visual_assets.append(asset)
     
     print(f"Filtered to {len(visual_assets)} visual assets from {len(available_assets)} total")
+    
+    # If we have no visual assets, be more permissive
+    if len(visual_assets) == 0:
+        print("No assets passed strict filtering, trying more permissive approach...")
+        for asset in available_assets:
+            # Only exclude obvious rig controls
+            asset_name = asset['name'].lower()
+            if not any(keyword in asset_name for keyword in ['cs_', 'ctrl', 'ik_', 'bone_']):
+                visual_assets.append(asset)
+                if len(visual_assets) >= 10:  # Take first 10
+                    break
+        
+        print(f"Permissive filtering found {len(visual_assets)} assets")
+    
     return visual_assets
 
 
@@ -230,7 +264,7 @@ def generate_asset_aware_mock_data(available_assets, count):
     for i in range(count):
         # Randomly select from filtered visual assets
         asset = random.choice(filtered_assets)
-        selected_assets.append(asset['name'])
+        selected_assets.append(asset)  # Store full asset data, not just name
         
         # Generate location based on asset type
         if asset['category'] == 'architecture':
@@ -258,13 +292,13 @@ def generate_asset_aware_mock_data(available_assets, count):
     
     return {
         "locations": locations,
-        "selected_assets": selected_assets,
+        "selected_assets": selected_assets,  # Full asset data
         "reasoning": f"Mock selection from {len(filtered_assets)} filtered visual assets with category-aware placement"
     }
 
 
 def build_scene_from_instructions(instructions):
-    """Enhanced scene builder that loads actual assets instead of cubes."""
+    """Optimized scene builder with batched asset loading for performance."""
     # Clear existing mesh objects
     bpy.ops.object.select_all(action='DESELECT')
     bpy.ops.object.select_by_type(type='MESH')
@@ -285,139 +319,321 @@ def build_scene_from_instructions(instructions):
     print(f"AI Reasoning: {reasoning}")
     
     if selected_assets:
-        print(f"Selected Assets: {selected_assets}")
-        print("Attempting to load actual assets...")
-
-    # Get database for asset lookup
-    try:
-        from . import database
-        db = database.get_database()
+        print(f"Building scene with {len(selected_assets)} selected assets...")
         
-        for i, loc in enumerate(locations):
-            if not isinstance(loc, (list, tuple)) or len(loc) != 3:
-                print(f"Safeguard: Skipping invalid location at index {i}. Expected 3 coordinates, but got {loc}")
-                continue
-            
-            if not all(isinstance(item, (int, float)) for item in loc):
-                print(f"Safeguard: Skipping invalid location at index {i}. Contains non-numeric values: {loc}")
-                continue
-            
-            # Try to load actual asset if available
-            asset_loaded = False
-            if i < len(selected_assets) and selected_assets[i]:
-                asset_name = selected_assets[i]
-                
-                try:
-                    # Search for the asset in database
-                    assets = db.fast_asset_search(limit=1000)
-                    matching_asset = None
-                    
-                    for asset in assets:
-                        if asset['name'] == asset_name:
-                            matching_asset = asset
-                            break
-                    
-                    if matching_asset:
-                        asset_loaded = load_actual_asset(matching_asset, loc)
-                        if asset_loaded:
-                            print(f"✅ Loaded actual asset: {asset_name} at {loc}")
-                        
-                except Exception as e:
-                    print(f"❌ Failed to load asset {asset_name}: {e}")
-            
-            # Fallback to cube if asset loading failed
-            if not asset_loaded:
-                bpy.ops.mesh.primitive_cube_add(location=loc)
-                obj = bpy.context.active_object
-                
-                if i < len(selected_assets) and selected_assets[i]:
-                    obj.name = f"{selected_assets[i]}_cube_{i}"
-                    obj["asset_name"] = selected_assets[i]
-                    obj["asset_index"] = i
-                    print(f"📦 Created cube placeholder for: {selected_assets[i]} at {loc}")
-                else:
-                    obj.name = f"object_{i}"
-                    print(f"📦 Created cube at: {loc}")
-                    
-    except Exception as e:
-        print(f"Error with asset loading system: {e}")
-        # Fallback to original cube creation
+        # PERFORMANCE OPTIMIZATION: Group assets by blend file
+        assets_by_file = group_assets_by_blend_file(selected_assets, locations)
+        
+        # Load assets in batches by file for optimal performance
+        load_assets_optimized(assets_by_file)
+    else:
+        # Fallback to cubes if no assets
         for i, loc in enumerate(locations):
             if isinstance(loc, (list, tuple)) and len(loc) == 3:
                 bpy.ops.mesh.primitive_cube_add(location=loc)
-                if i < len(selected_assets):
-                    obj = bpy.context.active_object
-                    obj.name = f"{selected_assets[i]}_cube_{i}"
+                obj = bpy.context.active_object
+                obj.name = f"object_{i}"
+                print(f"📦 Created cube at: {loc}")
 
 
-def load_actual_asset(asset_data, location):
-    """
-    Load actual asset from blend file.
-    """
-    blend_file_path = asset_data.get('blend_file_path')
-    collection_name = asset_data.get('collection_name')
+def group_assets_by_blend_file(selected_assets, locations):
+    """Group assets by their source .blend file for batch loading."""
+    assets_by_file = {}
     
-    if not blend_file_path or not os.path.exists(blend_file_path):
-        print(f"Asset file not found: {blend_file_path}")
-        return False
+    for i, asset_data in enumerate(selected_assets):
+        if not asset_data or i >= len(locations):
+            continue
+            
+        location = locations[i]
+        
+        # Validate location
+        if not isinstance(location, (list, tuple)) or len(location) != 3:
+            print(f"Skipping invalid location at index {i}: {location}")
+            continue
+        
+        if not all(isinstance(item, (int, float)) for item in location):
+            print(f"Skipping non-numeric location at index {i}: {location}")
+            continue
+        
+        # Validate asset data
+        if not all(field in asset_data for field in ['id', 'name', 'blend_file_path']):
+            print(f"Skipping asset with missing data at index {i}: {asset_data.get('name', 'unknown')}")
+            continue
+        
+        blend_file = asset_data['blend_file_path']
+        
+        # Validate file exists
+        if not os.path.exists(blend_file):
+            print(f"Skipping asset with missing file: {blend_file}")
+            continue
+        
+        # Group by file
+        if blend_file not in assets_by_file:
+            assets_by_file[blend_file] = []
+        
+        assets_by_file[blend_file].append({
+            'asset_data': asset_data,
+            'location': location,
+            'index': i
+        })
+    
+    print(f"📊 Grouped {len(selected_assets)} assets into {len(assets_by_file)} files:")
+    for blend_file, assets in assets_by_file.items():
+        print(f"   {os.path.basename(blend_file)}: {len(assets)} assets")
+    
+    return assets_by_file
+
+
+def load_assets_optimized(assets_by_file):
+    """Load assets in batches by file for optimal performance."""
+    total_loaded = 0
+    total_failed = 0
+    
+    for blend_file, asset_entries in assets_by_file.items():
+        print(f"\n🔄 Processing file: {os.path.basename(blend_file)} ({len(asset_entries)} assets)")
+        
+        try:
+            loaded, failed = load_assets_from_single_file(blend_file, asset_entries)
+            total_loaded += loaded
+            total_failed += failed
+            
+        except Exception as e:
+            print(f"❌ Failed to process file {blend_file}: {e}")
+            # Create cube fallbacks for all assets in this file
+            for entry in asset_entries:
+                create_cube_fallback(entry['asset_data'], entry['location'], entry['index'])
+            total_failed += len(asset_entries)
+    
+    print(f"\n📊 Asset loading complete: {total_loaded} loaded, {total_failed} failed")
+
+
+def load_assets_from_single_file(blend_file, asset_entries):
+    """Load multiple assets from a single .blend file efficiently."""
+    loaded_count = 0
+    failed_count = 0
+    
+    # Separate collection-based and mesh-based assets
+    collection_assets = []
+    mesh_assets = []
+    
+    for entry in asset_entries:
+        asset_data = entry['asset_data']
+        if asset_data.get('collection_name'):
+            collection_assets.append(entry)
+        else:
+            mesh_assets.append(entry)
+    
+    # Load collections in batch
+    if collection_assets:
+        collections_loaded, collections_failed = load_collections_batch(blend_file, collection_assets)
+        loaded_count += collections_loaded
+        failed_count += collections_failed
+    
+    # Load meshes in batch
+    if mesh_assets:
+        meshes_loaded, meshes_failed = load_meshes_batch(blend_file, mesh_assets)
+        loaded_count += meshes_loaded
+        failed_count += meshes_failed
+    
+    return loaded_count, failed_count
+
+
+def load_collections_batch(blend_file, collection_assets):
+    """Load multiple collections from a single file in one operation."""
+    print(f"   Loading {len(collection_assets)} collections...")
+    
+    # Extract collection names needed
+    collection_names = [entry['asset_data']['collection_name'] for entry in collection_assets]
     
     try:
-        if collection_name:
-            # Load collection from blend file
-            with bpy.data.libraries.load(blend_file_path) as (data_from, data_to):
-                if collection_name in data_from.collections:
-                    data_to.collections = [collection_name]
-                else:
-                    print(f"Collection '{collection_name}' not found in {blend_file_path}")
-                    return False
+        # Single file open operation for all collections
+        with bpy.data.libraries.load(blend_file, link=False) as (data_from, data_to):
+            available_collections = list(data_from.collections)
+            collections_to_load = []
             
-            # Instance the collection
+            for collection_name in collection_names:
+                if collection_name in available_collections:
+                    collections_to_load.append(collection_name)
+                else:
+                    print(f"     ⚠️  Collection '{collection_name}' not found")
+            
+            # Load all valid collections at once
+            data_to.collections = collections_to_load
+            print(f"     📦 Loading {len(collections_to_load)} collections in batch")
+        
+        # Create instances for successfully loaded collections
+        loaded_count = 0
+        failed_count = 0
+        
+        for entry in collection_assets:
+            asset_data = entry['asset_data']
+            collection_name = asset_data['collection_name']
+            
             if collection_name in bpy.data.collections:
-                collection = bpy.data.collections[collection_name]
-                
-                # Create an empty object to instance the collection
-                bpy.ops.object.empty_add(location=location)
-                empty_obj = bpy.context.active_object
-                empty_obj.name = f"{asset_data['name']}_instance"
-                
-                # Set the empty to instance the collection
-                empty_obj.instance_type = 'COLLECTION'
-                empty_obj.instance_collection = collection
-                
-                print(f"Successfully loaded collection: {collection_name}")
-                return True
-        else:
-            # Try to load individual objects
-            with bpy.data.libraries.load(blend_file_path) as (data_from, data_to):
-                # Look for meshes with similar name
-                matching_meshes = [mesh for mesh in data_from.meshes if asset_data['name'].lower() in mesh.lower()]
-                if matching_meshes:
-                    data_to.meshes = [matching_meshes[0]]
-                    data_to.materials = data_from.materials  # Load materials too
-                else:
-                    return False
-            
-            # Create object with loaded mesh
-            if matching_meshes[0] in bpy.data.meshes:
-                mesh = bpy.data.meshes[matching_meshes[0]]
-                obj = bpy.data.objects.new(asset_data['name'], mesh)
-                bpy.context.collection.objects.link(obj)
-                obj.location = location
-                
-                print(f"Successfully loaded mesh: {matching_meshes[0]}")
-                return True
-                
+                # Create collection instance
+                create_collection_instance(asset_data, entry['location'])
+                loaded_count += 1
+                print(f"     ✅ {asset_data['name']}")
+            else:
+                # Create fallback cube
+                create_cube_fallback(asset_data, entry['location'], entry['index'])
+                failed_count += 1
+                print(f"     ❌ {asset_data['name']} (collection not loaded)")
+        
+        return loaded_count, failed_count
+        
     except Exception as e:
-        print(f"Failed to load asset {asset_data['name']}: {e}")
-        return False
+        print(f"     ❌ Batch collection loading failed: {e}")
+        # Create fallbacks for all
+        for entry in collection_assets:
+            create_cube_fallback(entry['asset_data'], entry['location'], entry['index'])
+        return 0, len(collection_assets)
+
+
+def load_meshes_batch(blend_file, mesh_assets):
+    """Load multiple meshes from a single file in one operation."""
+    print(f"   Loading {len(mesh_assets)} meshes...")
     
-    return False
+    try:
+        # Single file open operation for all meshes
+        with bpy.data.libraries.load(blend_file, link=False) as (data_from, data_to):
+            available_meshes = list(data_from.meshes)
+            meshes_to_load = []
+            asset_mesh_map = {}  # Map asset to mesh name
+            
+            # Find matching meshes for each asset
+            for entry in mesh_assets:
+                asset_data = entry['asset_data']
+                asset_name = asset_data['name']
+                
+                # Find best matching mesh
+                matching_meshes = find_matching_mesh_names(asset_name, available_meshes)
+                
+                if matching_meshes:
+                    selected_mesh = matching_meshes[0]  # Take best match
+                    meshes_to_load.append(selected_mesh)
+                    asset_mesh_map[asset_data['id']] = selected_mesh
+                    print(f"     🔗 {asset_name} -> {selected_mesh}")
+                else:
+                    print(f"     ⚠️  No mesh found for {asset_name}")
+            
+            # Load all meshes and materials at once
+            data_to.meshes = list(set(meshes_to_load))  # Remove duplicates
+            data_to.materials = data_from.materials
+            print(f"     📦 Loading {len(set(meshes_to_load))} unique meshes in batch")
+        
+        # Create objects for successfully loaded meshes
+        loaded_count = 0
+        failed_count = 0
+        
+        for entry in mesh_assets:
+            asset_data = entry['asset_data']
+            asset_id = asset_data['id']
+            
+            if asset_id in asset_mesh_map:
+                mesh_name = asset_mesh_map[asset_id]
+                if mesh_name in bpy.data.meshes:
+                    # Create mesh object
+                    create_mesh_object(asset_data, entry['location'], mesh_name)
+                    loaded_count += 1
+                    print(f"     ✅ {asset_data['name']}")
+                else:
+                    create_cube_fallback(asset_data, entry['location'], entry['index'])
+                    failed_count += 1
+                    print(f"     ❌ {asset_data['name']} (mesh not loaded)")
+            else:
+                create_cube_fallback(asset_data, entry['location'], entry['index'])
+                failed_count += 1
+        
+        return loaded_count, failed_count
+        
+    except Exception as e:
+        print(f"     ❌ Batch mesh loading failed: {e}")
+        # Create fallbacks for all
+        for entry in mesh_assets:
+            create_cube_fallback(entry['asset_data'], entry['location'], entry['index'])
+        return 0, len(mesh_assets)
+
+
+def find_matching_mesh_names(asset_name, available_meshes):
+    """Find meshes that match the asset name using multiple strategies."""
+    asset_name_lower = asset_name.lower()
+    matches = []
+    
+    # Strategy 1: Exact match
+    for mesh_name in available_meshes:
+        if mesh_name == asset_name:
+            matches.insert(0, mesh_name)  # Prioritize exact matches
+    
+    # Strategy 2: Contains asset name
+    for mesh_name in available_meshes:
+        mesh_lower = mesh_name.lower()
+        if asset_name_lower in mesh_lower and mesh_name not in matches:
+            matches.append(mesh_name)
+    
+    # Strategy 3: Asset name contains mesh name
+    for mesh_name in available_meshes:
+        mesh_lower = mesh_name.lower()
+        if mesh_lower in asset_name_lower and mesh_name not in matches:
+            matches.append(mesh_name)
+    
+    # Strategy 4: Prefix matching with DATA_ handling
+    for mesh_name in available_meshes:
+        # Handle DATA_ prefix common in Blender exports
+        clean_mesh = mesh_name.replace('DATA_', '').lower()
+        if clean_mesh == asset_name_lower and mesh_name not in matches:
+            matches.append(mesh_name)
+    
+    return matches
+
+
+def create_collection_instance(asset_data, location):
+    """Create a collection instance object."""
+    collection_name = asset_data['collection_name']
+    collection = bpy.data.collections[collection_name]
+    
+    # Create empty object to instance the collection
+    bpy.ops.object.empty_add(location=location)
+    empty_obj = bpy.context.active_object
+    empty_obj.name = f"{asset_data['name']}_instance_{asset_data['id']}"
+    
+    # Set up collection instancing
+    empty_obj.instance_type = 'COLLECTION'
+    empty_obj.instance_collection = collection
+    
+    # Store metadata
+    empty_obj["asset_id"] = asset_data['id']
+    empty_obj["asset_name"] = asset_data['name']
+    empty_obj["collection_name"] = collection_name
+
+
+def create_mesh_object(asset_data, location, mesh_name):
+    """Create a mesh object."""
+    mesh = bpy.data.meshes[mesh_name]
+    obj = bpy.data.objects.new(f"{asset_data['name']}_{asset_data['id']}", mesh)
+    bpy.context.collection.objects.link(obj)
+    obj.location = location
+    
+    # Store metadata
+    obj["asset_id"] = asset_data['id']
+    obj["asset_name"] = asset_data['name']
+    obj["mesh_name"] = mesh_name
+
+
+def create_cube_fallback(asset_data, location, index):
+    """Create a cube fallback when asset loading fails."""
+    bpy.ops.mesh.primitive_cube_add(location=location)
+    obj = bpy.context.active_object
+    obj.name = f"{asset_data['name']}_cube_{index}"
+    obj["asset_id"] = asset_data['id']
+    obj["asset_name"] = asset_data['name']
+    obj["asset_index"] = index
 
 
 def get_asset_recommendations(prompt, style, available_assets, count):
     """
     Get AI recommendations for which assets to use without generating the full scene.
-    Enhanced to filter visual assets.
+    Enhanced to filter visual assets and use asset IDs.
     """
     # Filter for visual assets first
     filtered_assets = filter_visual_assets(available_assets)
@@ -464,241 +680,3 @@ def get_asset_recommendations(prompt, style, available_assets, count):
     # Sort by score and return top assets
     scored_assets.sort(key=lambda x: x[1], reverse=True)
     return [asset for asset, score in scored_assets[:count * 2]]  # Return more options than needed
-# diagnostic_backend.py - Add this to your backend.py to debug asset loading
-
-def load_actual_asset_debug(asset_data, location):
-    """
-    Debug version of load_actual_asset with detailed logging.
-    """
-    print(f"\n=== DEBUGGING ASSET LOADING ===")
-    print(f"Asset Name: {asset_data.get('name', 'Unknown')}")
-    print(f"Asset Data Keys: {list(asset_data.keys())}")
-    print(f"Blend File Path: {asset_data.get('blend_file_path', 'None')}")
-    print(f"Collection Name: {asset_data.get('collection_name', 'None')}")
-    print(f"Category: {asset_data.get('category', 'None')}")
-    print(f"Location: {location}")
-    
-    blend_file_path = asset_data.get('blend_file_path')
-    collection_name = asset_data.get('collection_name')
-    
-    # Check 1: File path validation
-    if not blend_file_path:
-        print("❌ FAIL: No blend_file_path in asset data")
-        return False
-    
-    print(f"Blend file path exists: {os.path.exists(blend_file_path)}")
-    
-    if not os.path.exists(blend_file_path):
-        print(f"❌ FAIL: Blend file not found at: {blend_file_path}")
-        return False
-    
-    print("✓ Blend file exists")
-    
-    # Check 2: Collection name
-    if not collection_name:
-        print("⚠️  WARNING: No collection_name, trying mesh loading instead")
-        return load_mesh_instead(asset_data, location, blend_file_path)
-    
-    print(f"Attempting to load collection: {collection_name}")
-    
-    try:
-        # Check 3: Preview what's in the blend file
-        print("Checking blend file contents...")
-        with bpy.data.libraries.load(blend_file_path, link=False) as (data_from, data_to):
-            print(f"Available collections: {list(data_from.collections)}")
-            print(f"Available meshes: {list(data_from.meshes)[:10]}...")  # First 10 meshes
-            print(f"Available objects: {list(data_from.objects)[:10]}...")  # First 10 objects
-            
-            if collection_name in data_from.collections:
-                print(f"✓ Found collection '{collection_name}' in blend file")
-                data_to.collections = [collection_name]
-            else:
-                print(f"❌ Collection '{collection_name}' not found")
-                print("Available collections:", data_from.collections)
-                return False
-        
-        # Check 4: Verify collection was loaded
-        if collection_name in bpy.data.collections:
-            print(f"✓ Collection '{collection_name}' loaded into Blender")
-            collection = bpy.data.collections[collection_name]
-            print(f"Collection has {len(collection.objects)} objects")
-            
-            # Check 5: Create instance
-            print("Creating collection instance...")
-            bpy.ops.object.empty_add(location=location)
-            empty_obj = bpy.context.active_object
-            empty_obj.name = f"{asset_data['name']}_instance"
-            
-            # Set the empty to instance the collection
-            empty_obj.instance_type = 'COLLECTION'
-            empty_obj.instance_collection = collection
-            
-            print(f"✅ SUCCESS: Created collection instance for {asset_data['name']}")
-            return True
-        else:
-            print(f"❌ FAIL: Collection not available after loading")
-            return False
-            
-    except Exception as e:
-        print(f"❌ EXCEPTION during loading: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def load_mesh_instead(asset_data, location, blend_file_path):
-    """Try to load individual mesh instead of collection."""
-    print("\n--- Attempting mesh loading instead ---")
-    
-    try:
-        asset_name = asset_data['name']
-        print(f"Looking for mesh similar to: {asset_name}")
-        
-        with bpy.data.libraries.load(blend_file_path, link=False) as (data_from, data_to):
-            # Look for meshes with similar name
-            matching_meshes = []
-            asset_name_lower = asset_name.lower()
-            
-            for mesh_name in data_from.meshes:
-                if (asset_name_lower in mesh_name.lower() or 
-                    mesh_name.lower() in asset_name_lower):
-                    matching_meshes.append(mesh_name)
-            
-            print(f"Found {len(matching_meshes)} matching meshes: {matching_meshes[:5]}")
-            
-            if matching_meshes:
-                # Load the first matching mesh
-                selected_mesh = matching_meshes[0]
-                data_to.meshes = [selected_mesh]
-                print(f"Loading mesh: {selected_mesh}")
-            else:
-                print("No matching meshes found")
-                return False
-        
-        # Create object with loaded mesh
-        if selected_mesh in bpy.data.meshes:
-            mesh = bpy.data.meshes[selected_mesh]
-            obj = bpy.data.objects.new(asset_data['name'], mesh)
-            bpy.context.collection.objects.link(obj)
-            obj.location = location
-            
-            print(f"✅ SUCCESS: Created mesh object for {asset_data['name']}")
-            return True
-        else:
-            print("❌ Mesh not available after loading")
-            return False
-            
-    except Exception as e:
-        print(f"❌ EXCEPTION during mesh loading: {e}")
-        return False
-
-
-# Replace the load_actual_asset function in build_scene_from_instructions
-def build_scene_from_instructions_debug(instructions):
-    """Debug version of build_scene_from_instructions."""
-    # Clear existing mesh objects
-    bpy.ops.object.select_all(action='DESELECT')
-    bpy.ops.object.select_by_type(type='MESH')
-    bpy.ops.object.delete()
-
-    if not instructions or not isinstance(instructions, dict) or "locations" not in instructions:
-        print("Safeguard: AI response was missing the 'locations' key or was not a dictionary.")
-        return
-
-    locations = instructions["locations"]
-    selected_assets = instructions.get("selected_assets", [])
-    reasoning = instructions.get("reasoning", "No reasoning provided")
-
-    if not isinstance(locations, list):
-        print(f"Safeguard: AI returned 'locations' as a {type(locations)}, but it must be a list.")
-        return
-
-    print(f"AI Reasoning: {reasoning}")
-    
-    if selected_assets:
-        print(f"Selected Assets: {selected_assets}")
-        print("=== STARTING ASSET LOADING DEBUG ===")
-
-    # Get database for asset lookup
-    try:
-        from . import database
-        db = database.get_database()
-        
-        # Get all assets from database for debugging
-        all_assets = db.fast_asset_search(limit=2000)
-        print(f"Total assets in database: {len(all_assets)}")
-        
-        # Show sample asset structure
-        if all_assets:
-            sample_asset = all_assets[0]
-            print(f"Sample asset keys: {list(sample_asset.keys())}")
-            print(f"Sample asset: {sample_asset}")
-        
-        for i, loc in enumerate(locations):
-            if not isinstance(loc, (list, tuple)) or len(loc) != 3:
-                print(f"Safeguard: Skipping invalid location at index {i}. Expected 3 coordinates, but got {loc}")
-                continue
-            
-            if not all(isinstance(item, (int, float)) for item in loc):
-                print(f"Safeguard: Skipping invalid location at index {i}. Contains non-numeric values: {loc}")
-                continue
-            
-            # Try to load actual asset if available
-            asset_loaded = False
-            if i < len(selected_assets) and selected_assets[i]:
-                asset_name = selected_assets[i]
-                print(f"\n--- Processing asset {i+1}/{len(locations)}: {asset_name} ---")
-                
-                try:
-                    # Search for the asset in database
-                    matching_asset = None
-                    
-                    for asset in all_assets:
-                        if asset['name'] == asset_name:
-                            matching_asset = asset
-                            break
-                    
-                    if matching_asset:
-                        print(f"✓ Found asset in database: {asset_name}")
-                        asset_loaded = load_actual_asset_debug(matching_asset, loc)
-                    else:
-                        print(f"❌ Asset '{asset_name}' not found in database")
-                        print(f"Available assets starting with same letter: {[a['name'] for a in all_assets if a['name'].lower().startswith(asset_name[0].lower())][:5]}")
-                        
-                except Exception as e:
-                    print(f"❌ Failed to process asset {asset_name}: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            # Fallback to cube if asset loading failed
-            if not asset_loaded:
-                print(f"Creating cube fallback for position {i+1}")
-                bpy.ops.mesh.primitive_cube_add(location=loc)
-                obj = bpy.context.active_object
-                
-                if i < len(selected_assets) and selected_assets[i]:
-                    obj.name = f"{selected_assets[i]}_cube_{i}"
-                    obj["asset_name"] = selected_assets[i]
-                    obj["asset_index"] = i
-                    print(f"📦 Created cube placeholder for: {selected_assets[i]} at {loc}")
-                else:
-                    obj.name = f"object_{i}"
-                    print(f"📦 Created cube at: {loc}")
-                    
-    except Exception as e:
-        print(f"❌ Error with asset loading system: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Fallback to original cube creation
-        for i, loc in enumerate(locations):
-            if isinstance(loc, (list, tuple)) and len(loc) == 3:
-                bpy.ops.mesh.primitive_cube_add(location=loc)
-                if i < len(selected_assets):
-                    obj = bpy.context.active_object
-                    obj.name = f"{selected_assets[i]}_cube_{i}"
-
-
-# To use this debug version:
-# Replace the build_scene_from_instructions call in your backend.py with:
-# build_scene_from_instructions_debug(instructions)
