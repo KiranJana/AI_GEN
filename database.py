@@ -333,7 +333,21 @@ class AssetDatabase:
                 'keywords': json.dumps(['glass', 'window', 'transparent', 'clear', 'crystal']),
                 'confidence': 0.9,
                 'priority': 9
-            }
+            },
+            {
+                'pattern_type': 'category',
+                'pattern_name': 'vehicles',
+                'keywords': json.dumps(['bot', 'robot', 'security', 'pack', 'car', 'truck', 'bike']),
+                'confidence': 0.8,
+                'priority': 7
+            },
+            {
+                'pattern_type': 'category', 
+                'pattern_name': 'props',
+                'keywords': json.dumps(['snow', 'alpha', 'prop', 'box', 'barrel', 'crate']),
+                'confidence': 0.7,
+                'priority': 6
+            },
         ]
         
         with self.get_connection() as conn:

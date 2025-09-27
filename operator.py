@@ -1,4 +1,4 @@
-# operator.py
+# operator.py - Fixed threading version
 
 import bpy
 import os
@@ -6,8 +6,14 @@ import threading
 from datetime import datetime
 from . import backend
 from . import limit_manager
-from . import asset_scanner
 from . import database
+
+# Import the working scanner instead of the broken one
+try:
+    from .asset_scanner import RobustAssetScanner
+except ImportError:
+    # Fallback if import fails
+    RobustAssetScanner = None
 
 class WM_OT_generate_scene_operator(bpy.types.Operator):
     bl_label = "Generate Scene"
@@ -78,7 +84,12 @@ class WM_OT_generate_scene_operator(bpy.types.Operator):
             today = datetime.now().date()
             props.requests_today = len([r for r in usage_data.get("requests", []) if datetime.fromtimestamp(r).date() == today])
             
-            backend.build_scene_from_instructions(instructions)
+            # Use debug version if available
+            if hasattr(backend, 'build_scene_from_instructions_debug'):
+                backend.build_scene_from_instructions_debug(instructions)
+            else:
+                backend.build_scene_from_instructions(instructions)
+            
             props.status_text = "Generation Complete!"
             self.report({'INFO'}, "Scene generation finished.")
         else:
@@ -104,7 +115,7 @@ class WM_OT_scan_assets_operator(bpy.types.Operator):
         
         # Start scanning in a separate thread to avoid blocking UI
         scan_thread = threading.Thread(
-            target=self._scan_assets_thread,
+            target=self._scan_assets_thread_fixed,
             args=(context,)
         )
         scan_thread.daemon = True
@@ -115,47 +126,75 @@ class WM_OT_scan_assets_operator(bpy.types.Operator):
         
         return {'FINISHED'}
     
-    def _scan_assets_thread(self, context):
-        """Run asset scanning in separate thread."""
-        props = context.scene.my_tool_properties
+    def _scan_assets_thread_fixed(self, context):
+        """Run asset scanning with proper threading - FIXED VERSION."""
+        
+        # Get initial values from context (thread-safe)
+        asset_pack_path = context.scene.my_tool_properties.asset_pack_path
+        asset_pack_name = context.scene.my_tool_properties.asset_pack_name
+        force_rescan = context.scene.my_tool_properties.scan_force_rescan
+        
+        def safe_update_status(message):
+            """Safely update status from background thread."""
+            def update_status_main_thread():
+                try:
+                    context.scene.my_tool_properties.scan_status = message
+                except:
+                    print(f"Status update: {message}")  # Fallback to console
+                return None  # Important: return None to unregister timer
+            
+            # Schedule update on main thread
+            bpy.app.timers.register(update_status_main_thread, first_interval=0.0)
         
         try:
-            # Create scanner with user settings
-            db = database.create_database()  # Use dependency injection
-            scanner = asset_scanner.RobustAssetScanner(
-                database=db, 
-                max_workers=props.scan_max_workers
-            )
+            if not RobustAssetScanner:
+                safe_update_status("Error: Scanner not available")
+                return
             
-            # Update status
-            def update_status(msg):
-                props.scan_status = msg
-                # Force UI update (this needs to be called from main thread)
-                bpy.app.timers.register(lambda: None, first_interval=0.0)
+            # Use the working scanner
+            scanner = RobustAssetScanner()
             
-            update_status("Initializing scanner...")
+            safe_update_status("Initializing scanner...")
+            print("Asset scanning thread started")
             
             # Run the scan
-            pack_name = props.asset_pack_name if props.asset_pack_name else None
+            pack_name = asset_pack_name if asset_pack_name else None
             results = scanner.scan_asset_pack_robust(
-                pack_path=props.asset_pack_path,
+                pack_path=asset_pack_path,
                 pack_name=pack_name,
-                force_rescan=props.scan_force_rescan,
-                max_concurrent=props.scan_max_workers
+                force_rescan=force_rescan
             )
             
-            # Update properties with results
-            props.total_assets_in_db = results.get('total_assets', 0)
-            props.scan_status = f"Scan complete! Found {results.get('total_assets', 0)} assets"
+            # Update properties with results (thread-safe)
+            def update_results():
+                try:
+                    props = context.scene.my_tool_properties
+                    props.total_assets_in_db = results.get('total_assets', 0)
+                    
+                    # Create detailed status message
+                    stats = results.get('scan_stats', {})
+                    processed = stats.get('files_processed', 0)
+                    failed = stats.get('files_failed', 0)
+                    duration = stats.get('duration_seconds', 0)
+                    
+                    props.scan_status = f"Complete! {processed} files processed, {failed} failed, {results.get('total_assets', 0)} assets found ({duration:.1f}s)"
+                except Exception as e:
+                    print(f"Error updating results: {e}")
+                return None
             
-            print("=== SCAN RESULTS ===")
+            bpy.app.timers.register(update_results, first_interval=0.1)
+            
+            print("=== WORKING SCAN RESULTS ===")
+            print(f"Files processed: {results.get('scan_stats', {}).get('files_processed', 0)}")
+            print(f"Files failed: {results.get('scan_stats', {}).get('files_failed', 0)}")
             print(f"Total assets: {results.get('total_assets', 0)}")
             print(f"Categories: {results.get('category_breakdown', {})}")
-            print(f"Duration: {results.get('duration_seconds', 0):.1f} seconds")
+            print(f"Duration: {results.get('scan_stats', {}).get('duration_seconds', 0):.1f} seconds")
             
         except Exception as e:
-            props.scan_status = f"Scan failed: {str(e)}"
-            print(f"Asset scan error: {e}")
+            error_message = f"Scan failed: {str(e)}"
+            safe_update_status(error_message)
+            print(f"Working scanner error: {e}")
             import traceback
             traceback.print_exc()
 
@@ -188,24 +227,31 @@ class WM_OT_update_asset_stats_operator(bpy.types.Operator):
 class WM_OT_test_asset_intelligence_operator(bpy.types.Operator):
     bl_label = "Test Asset Intelligence"
     bl_idname = "wm.test_asset_intelligence_operator"
-    bl_description = "Run asset intelligence test"
+    bl_description = "Test the working scanner with a single file"
 
     def execute(self, context):
         props = context.scene.my_tool_properties
         
         try:
-            # Run quick database test
-            from . import test_scanner
+            if not RobustAssetScanner:
+                props.scan_status = "❌ Scanner not available"
+                self.report({'ERROR'}, "RobustAssetScanner not available")
+                return {'CANCELLED'}
             
-            props.scan_status = "Running intelligence test..."
+            # Test the working scanner
+            props.scan_status = "Testing working scanner..."
             
-            # Run the test in a thread
-            test_thread = threading.Thread(target=test_scanner.quick_database_test)
-            test_thread.daemon = True
-            test_thread.start()
+            # Create a simple test
+            scanner = RobustAssetScanner()
             
-            self.report({'INFO'}, "Asset intelligence test started - check console for results")
-            props.scan_status = "Test completed - check console"
+            # Check Blender executable
+            blender_path = scanner.blender_executable
+            if os.path.exists(blender_path):
+                props.scan_status = f"✅ Blender found at: {os.path.basename(blender_path)}"
+                self.report({'INFO'}, f"Working scanner ready. Blender: {blender_path}")
+            else:
+                props.scan_status = f"❌ Blender not found: {blender_path}"
+                self.report({'ERROR'}, f"Blender executable not found: {blender_path}")
             
         except Exception as e:
             props.scan_status = f"Test failed: {str(e)}"
@@ -239,7 +285,8 @@ class WM_OT_add_classification_pattern_operator(bpy.types.Operator):
         
         try:
             keywords_list = [k.strip() for k in self.keywords.split(',')]
-            asset_scanner.add_classification_pattern(
+            db = database.get_database()
+            db.add_classification_pattern(
                 self.pattern_type,
                 self.pattern_name,
                 keywords_list
