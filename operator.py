@@ -1,19 +1,24 @@
-# operator.py - Fixed threading version
+# operator.py - Thread-safe scanning implementation
 
 import bpy
 import os
 import threading
+import queue
+import time
 from datetime import datetime
 from . import backend
 from . import limit_manager
 from . import database
 
-# Import the working scanner instead of the broken one
+# Import the working scanner
 try:
     from .asset_scanner import RobustAssetScanner
 except ImportError:
-    # Fallback if import fails
     RobustAssetScanner = None
+
+# Global queue for thread communication
+scan_progress_queue = queue.Queue()
+current_scan_timer = None
 
 class WM_OT_generate_scene_operator(bpy.types.Operator):
     bl_label = "Generate Scene"
@@ -43,22 +48,12 @@ class WM_OT_generate_scene_operator(bpy.types.Operator):
         # Use asset intelligence if enabled and available
         if props.use_asset_intelligence:
             try:
-                db = database.get_database()
-                
-                # Get filtered assets based on user preferences
-                category = None if props.filter_category == 'ALL' else props.filter_category.lower()
-                quality = None if props.filter_quality == 'ALL' else props.filter_quality.lower()
-                
-                available_assets = db.fast_asset_search(
-                    category=category,
-                    quality_tier=quality,
-                    max_complexity=props.max_complexity,
-                    limit=100
-                )
+                # Get filtered assets from cache (no redundant database query)
+                available_assets = props.get_filtered_assets(limit=100)
                 
                 if available_assets:
-                    props.status_text = f"Using {len(available_assets)} assets from database..."
-                    # Enhanced scene generation with asset intelligence
+                    props.status_text = f"Using {len(available_assets)} assets from cache..."
+                    # Enhanced scene generation with asset intelligence - pass assets directly
                     instructions = backend.call_ai_service_with_assets(
                         props.prompt_input, 
                         props.scene_style, 
@@ -106,6 +101,7 @@ class WM_OT_scan_assets_operator(bpy.types.Operator):
     bl_description = "Scan BMS asset pack for AI intelligence"
 
     def execute(self, context):
+        global current_scan_timer
         props = context.scene.my_tool_properties
         
         if not props.asset_pack_path or not os.path.exists(props.asset_pack_path):
@@ -113,48 +109,66 @@ class WM_OT_scan_assets_operator(bpy.types.Operator):
             props.scan_status = "Error: Invalid path"
             return {'CANCELLED'}
         
-        # Start scanning in a separate thread to avoid blocking UI
+        # Stop any existing scan timer
+        if current_scan_timer:
+            try:
+                bpy.app.timers.unregister(current_scan_timer)
+            except:
+                pass
+            current_scan_timer = None
+        
+        # Clear the queue
+        while not scan_progress_queue.empty():
+            try:
+                scan_progress_queue.get_nowait()
+            except queue.Empty:
+                break
+        
+        # Start scanning in a separate thread
         scan_thread = threading.Thread(
-            target=self._scan_assets_thread_fixed,
+            target=self._scan_assets_thread_safe,
             args=(context,)
         )
         scan_thread.daemon = True
         scan_thread.start()
+        
+        # Start the timer to check for updates
+        current_scan_timer = self._check_scan_progress
+        bpy.app.timers.register(current_scan_timer, first_interval=0.1, persistent=True)
         
         props.scan_status = "Scanning started..."
         self.report({'INFO'}, "Asset scanning started in background")
         
         return {'FINISHED'}
     
-    def _scan_assets_thread_fixed(self, context):
-        """Run asset scanning with proper threading - FIXED VERSION."""
+    def _scan_assets_thread_safe(self, context):
+        """Run asset scanning with proper thread-safe communication."""
         
-        # Get initial values from context (thread-safe)
+        # Get initial values from context (thread-safe read)
         asset_pack_path = context.scene.my_tool_properties.asset_pack_path
         asset_pack_name = context.scene.my_tool_properties.asset_pack_name
         force_rescan = context.scene.my_tool_properties.scan_force_rescan
         
-        def safe_update_status(message):
-            """Safely update status from background thread."""
-            def update_status_main_thread():
-                try:
-                    context.scene.my_tool_properties.scan_status = message
-                except:
-                    print(f"Status update: {message}")  # Fallback to console
-                return None  # Important: return None to unregister timer
-            
-            # Schedule update on main thread
-            bpy.app.timers.register(update_status_main_thread, first_interval=0.0)
+        def queue_update(message, progress=None, is_complete=False, results=None):
+            """Queue a status update for the main thread."""
+            scan_progress_queue.put({
+                'type': 'status_update',
+                'message': message,
+                'progress': progress,
+                'is_complete': is_complete,
+                'results': results,
+                'timestamp': time.time()
+            })
         
         try:
             if not RobustAssetScanner:
-                safe_update_status("Error: Scanner not available")
+                queue_update("Error: Scanner not available", is_complete=True)
                 return
             
             # Use the working scanner
             scanner = RobustAssetScanner()
             
-            safe_update_status("Initializing scanner...")
+            queue_update("Initializing scanner...")
             print("Asset scanning thread started")
             
             # Run the scan
@@ -165,38 +179,66 @@ class WM_OT_scan_assets_operator(bpy.types.Operator):
                 force_rescan=force_rescan
             )
             
-            # Update properties with results (thread-safe)
-            def update_results():
-                try:
-                    props = context.scene.my_tool_properties
-                    props.total_assets_in_db = results.get('total_assets', 0)
-                    
-                    # Create detailed status message
-                    stats = results.get('scan_stats', {})
-                    processed = stats.get('files_processed', 0)
-                    failed = stats.get('files_failed', 0)
-                    duration = stats.get('duration_seconds', 0)
-                    
-                    props.scan_status = f"Complete! {processed} files processed, {failed} failed, {results.get('total_assets', 0)} assets found ({duration:.1f}s)"
-                except Exception as e:
-                    print(f"Error updating results: {e}")
-                return None
+            # Create final status message
+            stats = results.get('scan_stats', {})
+            processed = stats.get('files_processed', 0)
+            failed = stats.get('files_failed', 0)
+            duration = stats.get('duration_seconds', 0)
+            total_assets = results.get('total_assets', 0)
             
-            bpy.app.timers.register(update_results, first_interval=0.1)
+            final_message = f"Complete! {processed} files processed, {failed} failed, {total_assets} assets found ({duration:.1f}s)"
             
-            print("=== WORKING SCAN RESULTS ===")
-            print(f"Files processed: {results.get('scan_stats', {}).get('files_processed', 0)}")
-            print(f"Files failed: {results.get('scan_stats', {}).get('files_failed', 0)}")
-            print(f"Total assets: {results.get('total_assets', 0)}")
+            queue_update(final_message, progress=100, is_complete=True, results=results)
+            
+            print("=== THREAD-SAFE SCAN RESULTS ===")
+            print(f"Files processed: {processed}")
+            print(f"Files failed: {failed}")
+            print(f"Total assets: {total_assets}")
             print(f"Categories: {results.get('category_breakdown', {})}")
-            print(f"Duration: {results.get('scan_stats', {}).get('duration_seconds', 0):.1f} seconds")
+            print(f"Duration: {duration:.1f} seconds")
             
         except Exception as e:
             error_message = f"Scan failed: {str(e)}"
-            safe_update_status(error_message)
-            print(f"Working scanner error: {e}")
+            queue_update(error_message, is_complete=True)
+            print(f"Thread-safe scanner error: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _check_scan_progress(self):
+        """Timer function to check for progress updates from the scanning thread."""
+        global current_scan_timer
+        
+        try:
+            # Check for new messages in the queue
+            while not scan_progress_queue.empty():
+                try:
+                    update = scan_progress_queue.get_nowait()
+                    
+                    # Update the UI properties safely (we're in the main thread)
+                    if bpy.context and bpy.context.scene:
+                        props = bpy.context.scene.my_tool_properties
+                        props.scan_status = update['message']
+                        
+                        # Update results if scan is complete
+                        if update.get('is_complete') and update.get('results'):
+                            results = update['results']
+                            props.total_assets_in_db = results.get('total_assets', 0)
+                    
+                    # If scan is complete, stop the timer
+                    if update.get('is_complete'):
+                        current_scan_timer = None
+                        return None  # Unregister timer
+                        
+                except queue.Empty:
+                    break
+            
+            # Continue checking (return the interval for next check)
+            return 0.2
+            
+        except Exception as e:
+            print(f"Error in scan progress timer: {e}")
+            current_scan_timer = None
+            return None  # Unregister timer on error
 
 
 class WM_OT_update_asset_stats_operator(bpy.types.Operator):
@@ -312,6 +354,16 @@ def register():
     bpy.utils.register_class(WM_OT_add_classification_pattern_operator)
 
 def unregister():
+    global current_scan_timer
+    
+    # Clean up any running timers
+    if current_scan_timer:
+        try:
+            bpy.app.timers.unregister(current_scan_timer)
+        except:
+            pass
+        current_scan_timer = None
+    
     bpy.utils.unregister_class(WM_OT_add_classification_pattern_operator)
     bpy.utils.unregister_class(WM_OT_test_asset_intelligence_operator)
     bpy.utils.unregister_class(WM_OT_update_asset_stats_operator)
