@@ -328,3 +328,4 @@ def get_asset_recommendations(prompt, style, available_assets, count):
     # Sort by score and return top assets
     scored_assets.sort(key=lambda x: x[1], reverse=True)
     return [asset for asset, score in scored_assets[:count * 2]]  # Return more options than needed
+
