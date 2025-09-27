@@ -19,7 +19,7 @@ except ImportError:
 
 # --- Main Backend Logic ---
 
-API_KEY = "AIzaSyDLHtr-56kuEtWT2Gvyqci-5XnSQC23z1g" # Make sure your key is pasted here
+API_KEY = "" # Make sure your key is pasted here
 
 def call_ai_service(prompt, style, count):
     """Original AI service call for basic scene generation."""
