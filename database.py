@@ -451,10 +451,23 @@ class AssetDatabase:
         
         query += " ORDER BY complexity_score, polygon_count LIMIT ?"
         params.append(limit)
-        
+         
         with self.get_connection() as conn:
             cursor = conn.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
+            results = []
+            
+            for row in cursor.fetchall():
+                asset = dict(row)
+                
+                # RECONSTRUCT dimensions array from width, height, depth
+                width = asset.get('width', 0.0) or 0.0
+                height = asset.get('height', 0.0) or 0.0  
+                depth = asset.get('depth', 0.0) or 0.0
+                asset['dimensions'] = [width, height, depth]
+                          
+                results.append(asset)
+        return results
+       
     
     # Data-driven classification methods
     def get_classification_patterns(self, pattern_type: str) -> List[Dict]:
