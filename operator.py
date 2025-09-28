@@ -346,12 +346,34 @@ class WM_OT_add_classification_pattern_operator(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self)
 
 
+class WM_OT_clear_asset_cache_operator(bpy.types.Operator):
+    bl_label = "Clear Asset Cache"
+    bl_idname = "wm.clear_asset_cache_operator"
+    bl_description = "Force clear the asset cache to refresh with latest data"
+
+    def execute(self, context):
+        try:
+            from .properties import get_cache_manager
+            cache_manager = get_cache_manager()
+            cache_manager.invalidate_cache()
+            
+            self.report({'INFO'}, "Asset cache cleared successfully")
+            print("🔄 Manual cache clear completed")
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to clear cache: {str(e)}")
+            return {'CANCELLED'}
+        
+        return {'FINISHED'}
+
+
 def register():
     bpy.utils.register_class(WM_OT_generate_scene_operator)
     bpy.utils.register_class(WM_OT_scan_assets_operator)
     bpy.utils.register_class(WM_OT_update_asset_stats_operator)
     bpy.utils.register_class(WM_OT_test_asset_intelligence_operator)
     bpy.utils.register_class(WM_OT_add_classification_pattern_operator)
+    bpy.utils.register_class(WM_OT_clear_asset_cache_operator)
 
 def unregister():
     global current_scan_timer
@@ -364,6 +386,7 @@ def unregister():
             pass
         current_scan_timer = None
     
+    bpy.utils.unregister_class(WM_OT_clear_asset_cache_operator)
     bpy.utils.unregister_class(WM_OT_add_classification_pattern_operator)
     bpy.utils.unregister_class(WM_OT_test_asset_intelligence_operator)
     bpy.utils.unregister_class(WM_OT_update_asset_stats_operator)

@@ -137,6 +137,10 @@ class VIEW3D_PT_asset_intelligence(bpy.types.Panel):
         action_row = actions_box.row()
         action_row.operator("wm.test_asset_intelligence_operator", text="Test Intelligence", icon='CONSOLE')
         action_row.operator("wm.add_classification_pattern_operator", text="Add Pattern", icon='ADD')
+        
+        # Cache management
+        cache_row = actions_box.row()
+        cache_row.operator("wm.clear_asset_cache_operator", text="Clear Cache", icon='TRASH')
 
 
 class VIEW3D_PT_asset_browser(bpy.types.Panel):
