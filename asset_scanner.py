@@ -467,7 +467,7 @@ def get_polygon_count(obj):
     return 0
 
 def get_vertex_count(obj):
-    \"\"\"Safely get vertex count from object.\"\"\"
+    \"\"\"Safely get vertex count from object.\"""
     try:
         if obj and obj.type == 'MESH' and obj.data and hasattr(obj.data, 'vertices'):
             return len(obj.data.vertices)
@@ -476,7 +476,7 @@ def get_vertex_count(obj):
     return 0
 
 def should_skip_collection(collection):
-    \"\"\"Skip empty or system collections.\"\"\"
+    \"\"\"Skip empty or system collections.\"""
     if not collection or len(collection.objects) == 0:
         return True
     name_lower = collection.name.lower()
@@ -486,7 +486,7 @@ def should_skip_collection(collection):
     return any(keyword in name_lower for keyword in skip_keywords)
 
 def should_skip_object_name(name):
-    \"\"\"Skip rig controls and system objects by name.\"\"\"
+    \"\"\"Skip rig controls and system objects by name.\"""
     if not name:
         return True
     name_lower = name.lower()
@@ -497,7 +497,7 @@ def should_skip_object_name(name):
     return any(keyword in name_lower for keyword in skip_keywords)
 
 def is_visual_object(obj):
-    \"\"\"Check if object is a visual mesh with geometry.\"\"\"
+    \"\"\"Check if object is a visual mesh with geometry.\"""
     if not obj or obj.type != 'MESH' or not obj.data:
         return False
     
@@ -517,7 +517,7 @@ def is_visual_object(obj):
     return True
 
 def classify_name(name, patterns):
-    \"\"\"Classify name using patterns.\"\"\"
+    \"\"\"Classify name using patterns.\"""
     if not name:
         return None
         
@@ -538,7 +538,7 @@ def classify_name(name, patterns):
     return best_match
 
 def calculate_complexity(polygon_count, object_count=1):
-    \"\"\"Calculate 0-10 complexity score.\"\"\"
+    \"\"\"Calculate 0-10 complexity score.\"""
     if polygon_count < 100: poly_score = 1
     elif polygon_count < 500: poly_score = 3
     elif polygon_count < 2000: poly_score = 5
@@ -549,7 +549,7 @@ def calculate_complexity(polygon_count, object_count=1):
     return min(poly_score * object_multiplier, 10.0)
 
 def determine_quality(polygon_count):
-    \"\"\"Determine quality tier.\"\"\"
+    \"\"\"Determine quality tier.\"""
     if polygon_count < 500: return 'low'
     elif polygon_count < 2000: return 'medium'
     elif polygon_count < 10000: return 'high'
@@ -607,28 +607,33 @@ except Exception as e:
         vertex_count = asset_data.get('vertex_count', 0)
         complexity_score = asset_data.get('complexity_score', 0.0)
         quality_tier = asset_data.get('quality_tier', 'medium')
-        
+
         # IMPROVED: Handle dimensions properly
         dimensions = asset_data.get('dimensions', [0.0, 0.0, 0.0])
-        
+
         # Ensure we have valid dimensions array
         if not isinstance(dimensions, list) or len(dimensions) < 3:
             dimensions = [0.0, 0.0, 0.0]
-        
+
         # Extract width, height, depth from dimensions
         width, height, depth = dimensions[0], dimensions[1], dimensions[2]
-        
+
         # Validate dimensions are reasonable numbers
         for i, dim in enumerate([width, height, depth]):
             if not isinstance(dim, (int, float)) or dim < 0 or dim > 10000:  # Max 10km
                 if i == 0: width = 0.0
                 elif i == 1: height = 0.0 
                 else: depth = 0.0
-        
+
         # Store bounding box info if available
         bbox_min = asset_data.get('bbox_min', [0.0, 0.0, 0.0])
         bbox_max = asset_data.get('bbox_max', [0.0, 0.0, 0.0])
-        
+
+        # --- NEW: Store object_name and collection_name for accurate loading ---
+        # If this is a collection, store collection_name, else store object_name
+        collection_name = asset_data['name'] if asset_data.get('type') == 'collection' else None
+        object_name = asset_data['name'] if asset_data.get('type') == 'object' else None
+
         # Create asset in database
         asset_id = self.db.create_asset_optimized(
             name=asset_data['name'],
@@ -636,7 +641,7 @@ except Exception as e:
             category=asset_data.get('category', 'props'),
             blend_file_path=blend_file_path,
             subcategory=None,
-            collection_name=asset_data['name'] if asset_data['type'] == 'collection' else None,
+            collection_name=collection_name,
             file_path=relative_path,
             polygon_count=polygon_count,
             vertex_count=vertex_count,
@@ -648,9 +653,11 @@ except Exception as e:
             estimated_load_time=max(0.1, polygon_count / 10000),
             memory_estimate=max(1.0, polygon_count / 1000),
             primary_style=None,
-            size_category=self._determine_size_category(width, height, depth)
+            size_category=self._determine_size_category(width, height, depth),
+            # --- Add object_name for object assets ---
+            object_name=object_name
         )
-        
+
         # Store additional metadata as properties
         try:
             if bbox_min and bbox_max:
@@ -661,15 +668,15 @@ except Exception as e:
                         (asset_id, property_type, property_key, property_value, data_type)
                         VALUES (?, ?, ?, ?, ?)
                     """, (asset_id, 'technical', 'bbox_min', json.dumps(bbox_min), 'json'))
-                    
+
                     conn.execute("""
                         INSERT OR REPLACE INTO asset_properties 
                         (asset_id, property_type, property_key, property_value, data_type)
                         VALUES (?, ?, ?, ?, ?)
                     """, (asset_id, 'technical', 'bbox_max', json.dumps(bbox_max), 'json'))
-                    
+
                     conn.commit()
-            
+
             # Add category tag
             if asset_data.get('category'):
                 with self.db.get_connection() as conn:
@@ -679,10 +686,10 @@ except Exception as e:
                         VALUES (?, ?, ?, ?)
                     """, (asset_id, asset_data['category'], 'category', 1.0))
                     conn.commit()
-                
+
         except Exception as e:
             logger.warning(f"Failed to add asset metadata for {asset_data['name']}: {e}")
-        
+
         return asset_id
     
     def _determine_size_category(self, width: float, height: float, depth: float) -> str:
@@ -727,15 +734,6 @@ except Exception as e:
             'quality_breakdown': dict(quality_counts),
             'database_stats': self.db.get_database_stats()
         }
-
-
-# Compatibility wrapper
-class AssetScanner(RobustAssetScanner):
-    """Backward compatibility wrapper."""
-    
-    def scan_asset_pack(self, pack_path: str, pack_name: str = None, 
-                       force_rescan: bool = False) -> Dict[str, Any]:
-        return self.scan_asset_pack_robust(pack_path, pack_name, force_rescan)
 
 
 # Convenience functions

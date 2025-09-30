@@ -14,72 +14,76 @@ class VIEW3D_PT_ai_scene_generator(bpy.types.Panel):
         layout = self.layout
         props = context.scene.my_tool_properties
 
-        # Scene Generation Section
-        main_box = layout.box()
-        main_box.label(text="1. Describe Your Scene:")
-        main_box.scale_y = 1.5
-        main_box.prop(props, "prompt_input", text="")
-        
-        settings_box = layout.box()
-        settings_box.label(text="2. Adjust Settings:")
-        row = settings_box.row(); row.label(text="Style:"); row.prop(props, "scene_style", text="")
-        row = settings_box.row(); row.label(text="Object Count:"); row.prop(props, "object_count", text="")
-        
-        # Asset Intelligence Section
-        intel_box = layout.box()
-        intel_box.label(text="3. Asset Intelligence:")
-        
-        # Toggle asset intelligence
-        intel_box.prop(props, "use_asset_intelligence", text="Use Smart Asset Selection")
-        
-        if props.use_asset_intelligence:
-            # Asset filters
-            filter_col = intel_box.column()
-            filter_col.prop(props, "filter_category", text="Category")
-            filter_col.prop(props, "filter_quality", text="Quality")
-            filter_col.prop(props, "max_complexity", text="Max Complexity")
-            
-            # Show cached asset count (no database query)
+        # ===== SECTION 1: Scene Description =====
+        prompt_box = layout.box()
+        prompt_box.label(text="Scene Description", icon='TEXT')
+        prompt_box.scale_y = 1.3
+        prompt_box.prop(props, "prompt_input", text="")
+
+        # Settings in a compact row
+        settings_row = layout.row(align=True)
+        settings_row.prop(props, "scene_style", text="Style")
+        settings_row.prop(props, "object_count", text="Count")
+
+        # ===== SECTION 2: Asset Library Status =====
+        asset_box = layout.box()
+        asset_box.label(text="Asset Library (Required)", icon='ASSET_MANAGER')
+
+        # Show asset pack status
+        if props.total_assets_in_db > 0:
+            status_row = asset_box.row()
+            status_row.label(text=f"✓ {props.total_assets_in_db} assets loaded", icon='CHECKMARK')
+
+            # Show matching count if filtered
             from .properties import get_cache_manager
             cache_manager = get_cache_manager()
-            
+
             if cache_manager.is_cache_valid():
                 cached_count = props.get_cached_asset_count()
-                info_row = filter_col.row()
-                info_row.label(text=f"Matching Assets: {cached_count}")
-            else:
-                refresh_row = filter_col.row()
-                refresh_row.operator("wm.refresh_asset_cache_operator", text="Load Asset Data", icon='FILE_REFRESH')
-        
-        effects_box = layout.box()
-        effects_box.label(text="4. Add Effects:")
-        effects_box.prop(props, "add_rain_effect")
+                if cached_count != props.total_assets_in_db:
+                    match_row = asset_box.row()
+                    match_row.label(text=f"Matching filters: {cached_count}", icon='FILTER')
 
-        # Generate button
-        generate_box = layout.box()
-        generate_box.scale_y = 2.0
-        if props.use_asset_intelligence and props.total_assets_in_db == 0:
-            generate_box.enabled = False
-            generate_box.operator("wm.generate_scene_operator", text="Scan Assets First", icon='ERROR')
+            # Asset filters - always visible since Asset Intelligence is mandatory
+            filter_col = asset_box.column(align=True)
+            filter_col.separator()
+            filter_col.label(text="Filters:")
+            filter_col.prop(props, "filter_category", text="Category")
+            filter_col.prop(props, "filter_quality", text="Quality")
+            filter_col.prop(props, "max_complexity", text="Complexity", slider=True)
         else:
-            generate_box.operator("wm.generate_scene_operator", text="Generate Scene", icon='PLAY')
-        
-        # Status section
+            warning_box = asset_box.box()
+            warning_box.label(text="⚠ Asset Library Required", icon='ERROR')
+            warning_box.label(text="Scan an asset pack to begin")
+            action_row = asset_box.row()
+            action_row.scale_y = 1.3
+            action_row.operator("wm.scan_assets_operator", text="Scan Asset Pack", icon='FILE_FOLDER')
+
+        # ===== SECTION 3: Generate Button =====
+        gen_box = layout.box()
+        gen_box.scale_y = 2.0
+
+        if props.total_assets_in_db == 0:
+            gen_box.enabled = False
+            gen_box.label(text="⚠ Scan assets first to generate", icon='INFO')
+        else:
+            gen_box.operator("wm.generate_scene_operator", text="🚀 Generate Scene", icon='PLAY')
+
+        # ===== SECTION 4: Status & Usage =====
         status_box = layout.box()
-        row = status_box.row(align=True)
-        row.label(text="Status:")
-        row.label(text=props.status_text, icon='INFO')
-        
-        # Usage tracking
-        usage_box = layout.box()
-        row = usage_box.row()
-        row.label(text="Daily Usage:")
-        row.label(text=f"{props.requests_today} / {limit_manager.RPD_LIMIT}")
+
+        # Status with appropriate icon
+        status_row = status_box.row()
+        status_icon = 'CHECKMARK' if "Complete" in props.status_text else 'ERROR' if "Error" in props.status_text else 'INFO'
+        status_row.label(text=f"Status: {props.status_text}", icon=status_icon)
+
+        # Usage tracker
+        usage_row = status_box.row()
+        usage_row.label(text=f"Usage: {props.requests_today}/{limit_manager.RPD_LIMIT} today", icon='SORTTIME')
 
         if props.cooldown_timer > 0:
-            row = usage_box.row()
-            row.label(text="Cooldown:")
-            row.label(text=f"{props.cooldown_timer} seconds", icon='TIME')
+            cooldown_row = status_box.row()
+            cooldown_row.label(text=f"Cooldown: {props.cooldown_timer}s", icon='TIME')
 
 
 class VIEW3D_PT_asset_intelligence(bpy.types.Panel):
@@ -94,53 +98,54 @@ class VIEW3D_PT_asset_intelligence(bpy.types.Panel):
         layout = self.layout
         props = context.scene.my_tool_properties
 
-        # Asset Pack Scanning
+        # ===== Asset Pack Scanner =====
         scan_box = layout.box()
-        scan_box.label(text="Asset Pack Scanner:")
-        
+        scan_box.label(text="Scan Asset Pack", icon='FILE_FOLDER')
+
         # Pack path selection
-        scan_box.prop(props, "asset_pack_path", text="Pack Path")
-        
-        row = scan_box.row()
-        row.prop(props, "asset_pack_name", text="Pack Name")
-        
-        # Scan settings
-        settings_row = scan_box.row()
-        settings_row.prop(props, "scan_force_rescan", text="Force Rescan")
+        scan_box.prop(props, "asset_pack_path", text="")
+
+        # Pack name (optional)
+        name_row = scan_box.row()
+        name_row.prop(props, "asset_pack_name", text="Pack Name")
+
+        # Scan settings in compact row
+        settings_row = scan_box.row(align=True)
+        settings_row.prop(props, "scan_force_rescan", text="Force Rescan", toggle=True)
         settings_row.prop(props, "scan_max_workers", text="Workers")
-        
+
         # Scan button
         scan_row = scan_box.row()
         scan_row.scale_y = 1.5
         if props.asset_pack_path:
-            scan_row.operator("wm.scan_assets_operator", text="Scan Asset Pack", icon='FILE_REFRESH')
+            scan_row.operator("wm.scan_assets_operator", text="Scan Asset Pack", icon='PLAY')
         else:
             scan_row.enabled = False
-            scan_row.operator("wm.scan_assets_operator", text="Select Pack Path First", icon='ERROR')
-        
+            scan_row.label(text="⚠ Select pack path first", icon='ERROR')
+
         # Scan status
-        status_row = scan_box.row()
-        status_row.label(text=f"Status: {props.scan_status}")
-        
-        # Database info - NO database query here, use cached values
+        if props.scan_status != "Not Started":
+            status_row = scan_box.row()
+            status_row.label(text=props.scan_status, icon='INFO')
+
+        # ===== Database Info =====
         db_box = layout.box()
-        db_box.label(text="Database Info:")
-        
+        db_box.label(text="Database Statistics", icon='PRESET')
+
         info_row = db_box.row()
-        info_row.label(text=f"Assets in DB: {props.total_assets_in_db}")
+        info_row.label(text=f"Total Assets: {props.total_assets_in_db}")
         info_row.operator("wm.update_asset_stats_operator", text="", icon='FILE_REFRESH')
-        
-        # Quick actions
+
+        # ===== Quick Actions =====
         actions_box = layout.box()
-        actions_box.label(text="Quick Actions:")
-        
-        action_row = actions_box.row()
-        action_row.operator("wm.test_asset_intelligence_operator", text="Test Intelligence", icon='CONSOLE')
-        action_row.operator("wm.add_classification_pattern_operator", text="Add Pattern", icon='ADD')
-        
-        # Cache management
-        cache_row = actions_box.row()
-        cache_row.operator("wm.clear_asset_cache_operator", text="Clear Cache", icon='TRASH')
+        actions_box.label(text="Maintenance", icon='TOOL_SETTINGS')
+
+        action_row = actions_box.row(align=True)
+        action_row.operator("wm.clear_asset_cache_operator", text="Clear Cache", icon='TRASH')
+        action_row.operator("wm.test_asset_intelligence_operator", text="Test", icon='CONSOLE')
+
+        pattern_row = actions_box.row()
+        pattern_row.operator("wm.add_classification_pattern_operator", text="Add Classification Pattern", icon='ADD')
 
 
 class VIEW3D_PT_asset_browser(bpy.types.Panel):
@@ -156,64 +161,52 @@ class VIEW3D_PT_asset_browser(bpy.types.Panel):
         props = context.scene.my_tool_properties
 
         if props.total_assets_in_db == 0:
-            layout.label(text="No assets in database")
-            layout.label(text="Scan an asset pack first")
+            info_box = layout.box()
+            info_box.label(text="No assets in database", icon='INFO')
+            info_box.label(text="Scan an asset pack to begin")
             return
 
-        # Asset search and preview - USE CACHED DATA, NO DATABASE QUERIES
-        search_box = layout.box()
-        search_box.label(text="Asset Search:")
-        
-        # Search filters (read-only display of current filters)
-        if props.use_asset_intelligence:
-            search_box.label(text=f"Category: {props.filter_category}")
-            search_box.label(text=f"Quality: {props.filter_quality}")
-            search_box.label(text=f"Max Complexity: {props.max_complexity:.1f}")
-            
-            # Show cached count without database query
-            from .properties import get_cache_manager
-            cache_manager = get_cache_manager()
-            
-            if cache_manager.is_cache_valid():
-                cached_count = props.get_cached_asset_count()
-                search_box.label(text=f"Found: {cached_count} assets")
-        
-        # Asset preview area - USE CACHED SAMPLE DATA
+        # ===== Asset Preview =====
         preview_box = layout.box()
-        preview_box.label(text="Asset Preview:")
-        
+        preview_box.label(text="Asset Preview", icon='VIEWZOOM')
+
         try:
-            # Get sample assets from cache (no database query)
             from .properties import get_cache_manager
             cache_manager = get_cache_manager()
-            
+
             sample_assets = props.get_cached_sample_assets()
-            
+
             if sample_assets:
-                preview_box.label(text=f"Showing {len(sample_assets)} sample assets:")
-                for asset in sample_assets[:3]:  # Show first 3
+                preview_box.label(text=f"Sample of {len(sample_assets)} assets:")
+
+                # Show first 3 sample assets
+                for asset in sample_assets[:3]:
                     row = preview_box.row()
-                    row.label(text=f"• {asset['name']}")
-                    row.label(text=f"({asset['category']}, {asset['quality_tier']})")
-                
-                # Show category breakdown from cache
+                    row.label(text=f"• {asset['name']}", icon='MESH_DATA')
+                    info_label = f"{asset['category']} | {asset['quality_tier']}"
+                    row.label(text=info_label)
+
+                # Show category breakdown
                 category_breakdown = props.get_cached_category_breakdown()
                 if category_breakdown:
-                    breakdown_row = preview_box.row()
-                    breakdown_text = ", ".join([f"{cat}: {count}" for cat, count in list(category_breakdown.items())[:3]])
-                    breakdown_row.label(text=f"Categories: {breakdown_text}")
-                    
+                    breakdown_box = preview_box.box()
+                    breakdown_box.label(text="Category Breakdown:", icon='OUTLINER')
+                    for cat, count in list(category_breakdown.items())[:5]:
+                        cat_row = breakdown_box.row()
+                        cat_row.label(text=f"  {cat}: {count}")
+
             else:
                 if cache_manager.is_cache_valid():
-                    preview_box.label(text="No assets match current filters")
+                    preview_box.label(text="No assets match filters", icon='ERROR')
                 else:
-                    preview_box.label(text="Loading asset data...")
-                    # Trigger cache refresh
+                    preview_box.label(text="Loading...", icon='TIME')
                     refresh_row = preview_box.row()
-                    refresh_row.operator("wm.refresh_asset_cache_operator", text="Load Assets", icon='FILE_REFRESH')
-                
+                    refresh_row.operator("wm.refresh_asset_cache_operator", text="Load Asset Data", icon='FILE_REFRESH')
+
         except Exception as e:
-            preview_box.label(text=f"Error: {str(e)}")
+            error_box = preview_box.box()
+            error_box.label(text="Error loading preview", icon='ERROR')
+            error_box.label(text=str(e)[:50])
 
 
 # New operator to manually refresh asset cache
