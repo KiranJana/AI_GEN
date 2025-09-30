@@ -20,7 +20,7 @@ except ImportError:
 
 # --- Main Backend Logic ---
 
-API_KEY = "" # Make sure your key is pasted here
+API_KEY = os.environ.get("GEMINI_API_KEY") # Make sure your key is pasted here
 
 
 def call_ai_service_with_assets(prompt, style, count, available_assets=None):
@@ -80,11 +80,11 @@ def call_ai_service_with_assets(prompt, style, count, available_assets=None):
             "scenes with ZERO overlapping assets while maintaining visual appeal.\n"
             "\n"
             "CRITICAL RULES (MUST FOLLOW):\n"
-            "1. 🚫 NEVER OVERLAP ASSETS - Use dimensions to calculate proper spacing\n"
-            "2. 📏 USE REALISTIC SPACING - Buildings 2m+ apart, vehicles 3m+ apart, props 0.5m+ apart\n"
-            "3. 🎯 GROUND PLACEMENT - Set Z=0 for ground objects (buildings, vehicles, streets)\n"
-            "4. 📐 CONSIDER FOOTPRINTS - Large objects need proportionally more space\n"
-            "5. ✅ VERIFY BEFORE OUTPUT - Check that no footprints overlap\n"
+            "1. NEVER OVERLAP ASSETS - Use dimensions to calculate proper spacing\n"
+            "2. USE REALISTIC SPACING - Buildings 2m+ apart, vehicles 3m+ apart, props 0.5m+ apart\n"
+            "3. GROUND PLACEMENT - Set Z=0 for ground objects (buildings, vehicles, streets)\n"
+            "4. CONSIDER FOOTPRINTS - Large objects need proportionally more space\n"
+            "5. VERIFY BEFORE OUTPUT - Check that no footprints overlap\n"
             "\n"
             "REQUIRED OUTPUT FORMAT:\n"
             "{\n"
@@ -133,7 +133,7 @@ def call_ai_service_with_assets(prompt, style, count, available_assets=None):
             "  • Y direction: (0, 11, 0) or further [10/2 + 6/2 + 2m spacing = 10m]\n"
             "  • Diagonal: (6, 9, 0) or similar positions maintaining spacing\n"
             "\n"
-            "INVALID position: (3, 0, 0) ❌ - WOULD OVERLAP!\n"
+            "INVALID position: (3, 0, 0) - WOULD OVERLAP!\n"
             "\n"
             "ASSET SELECTION:\n"
             "- Match categories to prompt keywords (e.g., 'street' → roads, vehicles, buildings)\n"
