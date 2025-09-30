@@ -45,31 +45,29 @@ class WM_OT_generate_scene_operator(bpy.types.Operator):
             props.status_text = "Error: Prompt is empty"
             return {'CANCELLED'}
 
-        # Use asset intelligence if enabled and available
-        if props.use_asset_intelligence:
-            try:
-                # Get filtered assets from cache (no redundant database query)
-                available_assets = props.get_filtered_assets(limit=100)
-                
-                if available_assets:
-                    props.status_text = f"Using {len(available_assets)} assets from cache..."
-                    # Enhanced scene generation with asset intelligence - pass assets directly
-                    instructions = backend.call_ai_service_with_assets(
-                        props.prompt_input, 
-                        props.scene_style, 
-                        props.object_count,
-                        available_assets
-                    )
-                else:
-                    props.status_text = "No assets found with current filters, using basic generation..."
-                    instructions = backend.call_ai_service(props.prompt_input, props.scene_style, props.object_count)
-                    
-            except Exception as e:
-                self.report({'WARNING'}, f"Asset intelligence failed: {e}, using basic generation")
-                instructions = backend.call_ai_service(props.prompt_input, props.scene_style, props.object_count)
-        else:
-            # Original basic scene generation
-            instructions = backend.call_ai_service(props.prompt_input, props.scene_style, props.object_count)
+        # Asset Intelligence is mandatory - always use assets
+        try:
+            # Get filtered assets from cache (no redundant database query)
+            available_assets = props.get_filtered_assets(limit=100)
+
+            if not available_assets:
+                props.status_text = "Error: No assets found. Scan asset pack or adjust filters."
+                self.report({'ERROR'}, "No assets found. Please scan an asset pack or adjust your filters.")
+                return {'CANCELLED'}
+
+            props.status_text = f"Generating with {len(available_assets)} assets..."
+            # Enhanced scene generation with asset intelligence
+            instructions = backend.call_ai_service_with_assets(
+                props.prompt_input,
+                props.scene_style,
+                props.object_count,
+                available_assets
+            )
+
+        except Exception as e:
+            props.status_text = f"Error: {str(e)}"
+            self.report({'ERROR'}, f"Asset generation failed: {e}")
+            return {'CANCELLED'}
         
         if instructions:
             usage_data = limit_manager.log_request(usage_data)

@@ -217,7 +217,7 @@ class MySceneProperties(bpy.types.PropertyGroup):
     use_asset_intelligence: bpy.props.BoolProperty(
         name="Use Asset Intelligence",
         description="Use asset database for intelligent scene generation",
-        default=False,
+        default=True,
         update=lambda self, context: get_cache_manager().invalidate_cache()
     )
     
@@ -233,10 +233,9 @@ class MySceneProperties(bpy.types.PropertyGroup):
             ('FURNITURE', "Furniture", "Tables, chairs, etc."),
             ('ELECTRONICS', "Electronics", "Computers, screens, devices"),
         ],
-        default='ALL',
-        update=lambda self, context: get_cache_manager().invalidate_cache()
+        default='ALL'
     )
-    
+
     filter_quality: bpy.props.EnumProperty(
         name="Quality Filter",
         description="Filter assets by quality tier",
@@ -247,17 +246,15 @@ class MySceneProperties(bpy.types.PropertyGroup):
             ('HIGH', "High", "High polygon count assets"),
             ('ULTRA', "Ultra", "Ultra high polygon count assets"),
         ],
-        default='ALL',
-        update=lambda self, context: get_cache_manager().invalidate_cache()
+        default='ALL'
     )
-    
+
     max_complexity: bpy.props.FloatProperty(
         name="Max Complexity",
         description="Maximum complexity score for selected assets",
         default=10.0,
         min=0.0,
-        max=10.0,
-        update=lambda self, context: get_cache_manager().invalidate_cache()
+        max=10.0
     )
     
     def get_filtered_assets(self, limit=100):

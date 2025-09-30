@@ -31,12 +31,13 @@ class AssetDatabase:
             self.db_path = os.path.join(config_path, "bms_asset_intelligence.db")
         else:
             self.db_path = db_path
-            
+
         # Ensure directory exists
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        
-        # Initialize schema
+
+        # Initialize schema and run migrations if needed
         self._initialize_schema()
+        self._run_migrations()
         logger.info(f"Asset database initialized at: {self.db_path}")
     
     @contextmanager
@@ -81,22 +82,28 @@ class AssetDatabase:
             subcategory TEXT,
             file_path TEXT NOT NULL,
             collection_name TEXT,
+            object_name TEXT,
             blend_file_path TEXT NOT NULL,
             thumbnail_path TEXT,
-            
+
             -- DENORMALIZED CRITICAL PROPERTIES (for fast queries without JOINs)
             -- Technical properties
             polygon_count INTEGER DEFAULT 0,
             vertex_count INTEGER DEFAULT 0,
             material_count INTEGER DEFAULT 0,
             object_count INTEGER DEFAULT 1,
-            
+
             -- Dimensions (in Blender units)
             width REAL DEFAULT 0.0,
             height REAL DEFAULT 0.0,
             depth REAL DEFAULT 0.0,
             volume REAL DEFAULT 0.0,
-            
+
+            -- Bounding box center for placement
+            bbox_center_x REAL DEFAULT 0.0,
+            bbox_center_y REAL DEFAULT 0.0,
+            bbox_center_z REAL DEFAULT 0.0,
+
             -- Performance metrics
             complexity_score REAL DEFAULT 0.0,
             quality_tier TEXT DEFAULT 'medium', -- 'low', 'medium', 'high', 'ultra'
@@ -255,7 +262,96 @@ class AssetDatabase:
             conn.commit()
             self._populate_default_patterns()
             logger.info("Optimized database schema initialized successfully")
-    
+
+    def _get_schema_version(self) -> int:
+        """Get current database schema version."""
+        with self.get_connection() as conn:
+            try:
+                cursor = conn.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
+                row = cursor.fetchone()
+                return row[0] if row else 0
+            except sqlite3.OperationalError:
+                # schema_version table doesn't exist yet
+                return 0
+
+    def _set_schema_version(self, version: int):
+        """Set database schema version."""
+        with self.get_connection() as conn:
+            # Create schema_version table if it doesn't exist
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (version,))
+            conn.commit()
+
+    def _run_migrations(self):
+        """Run database migrations to upgrade schema."""
+        current_version = self._get_schema_version()
+        target_version = 3  # Current schema version
+
+        if current_version >= target_version:
+            return
+
+        logger.info(f"Running database migrations from v{current_version} to v{target_version}")
+
+        # Migration v0 -> v1: Initial schema (already handled by _initialize_schema)
+        if current_version < 1:
+            self._set_schema_version(1)
+            current_version = 1
+
+        # Migration v1 -> v2: Add object_name column
+        if current_version < 2:
+            try:
+                with self.get_connection() as conn:
+                    # Check if column already exists
+                    cursor = conn.execute("PRAGMA table_info(assets)")
+                    columns = [row[1] for row in cursor.fetchall()]
+
+                    if 'object_name' not in columns:
+                        logger.info("Adding object_name column to assets table...")
+                        conn.execute("ALTER TABLE assets ADD COLUMN object_name TEXT")
+                        conn.commit()
+                        logger.info("Successfully added object_name column")
+                    else:
+                        logger.info("object_name column already exists")
+
+                    self._set_schema_version(2)
+                    current_version = 2
+            except Exception as e:
+                logger.error(f"Failed to migrate to v2: {e}")
+                logger.error("Please delete the database file and restart Blender to recreate it")
+                raise
+
+        # Migration v2 -> v3: Add bbox_center columns
+        if current_version < 3:
+            try:
+                with self.get_connection() as conn:
+                    # Check if columns already exist
+                    cursor = conn.execute("PRAGMA table_info(assets)")
+                    columns = [row[1] for row in cursor.fetchall()]
+
+                    if 'bbox_center_x' not in columns:
+                        logger.info("Adding bbox_center columns to assets table...")
+                        conn.execute("ALTER TABLE assets ADD COLUMN bbox_center_x REAL DEFAULT 0.0")
+                        conn.execute("ALTER TABLE assets ADD COLUMN bbox_center_y REAL DEFAULT 0.0")
+                        conn.execute("ALTER TABLE assets ADD COLUMN bbox_center_z REAL DEFAULT 0.0")
+                        conn.commit()
+                        logger.info("Successfully added bbox_center_x, bbox_center_y, bbox_center_z columns")
+                    else:
+                        logger.info("bbox_center columns already exist")
+
+                    self._set_schema_version(3)
+                    current_version = 3
+            except Exception as e:
+                logger.error(f"Failed to migrate to v3: {e}")
+                logger.error("Please delete the database file and restart Blender to recreate it")
+                raise
+
+        logger.info(f"Database migration complete: now at v{current_version}")
+
     def _populate_default_patterns(self):
         """Populate default classification patterns in database."""
         default_patterns = [
@@ -334,17 +430,11 @@ class AssetDatabase:
                 'confidence': 0.9,
                 'priority': 9
             },
+            # Note: Removed duplicate 'vehicles' pattern - already defined above
             {
                 'pattern_type': 'category',
-                'pattern_name': 'vehicles',
-                'keywords': json.dumps(['bot', 'robot', 'security', 'pack', 'car', 'truck', 'bike']),
-                'confidence': 0.8,
-                'priority': 7
-            },
-            {
-                'pattern_type': 'category', 
                 'pattern_name': 'props',
-                'keywords': json.dumps(['snow', 'alpha', 'prop', 'box', 'barrel', 'crate']),
+                'keywords': json.dumps(['snow', 'alpha', 'prop', 'box', 'barrel', 'crate', 'bot', 'robot', 'security', 'pack']),
                 'confidence': 0.7,
                 'priority': 6
             },
@@ -366,46 +456,56 @@ class AssetDatabase:
             conn.commit()
     
     # Fast Asset Operations (using denormalized data)
-    def create_asset_optimized(self, name: str, pack_id: int, category: str, 
+    def create_asset_optimized(self, name: str, pack_id: int, category: str,
                              blend_file_path: str, **properties) -> int:
         """Create asset with critical properties denormalized for performance."""
-        
+
         # Extract critical properties with defaults
         polygon_count = properties.get('polygon_count', 0)
         vertex_count = properties.get('vertex_count', 0)
         material_count = properties.get('material_count', 0)
         object_count = properties.get('object_count', 1)
-        
+
         dimensions = properties.get('dimensions', [0.0, 0.0, 0.0])
         width, height, depth = dimensions[:3] if len(dimensions) >= 3 else (0.0, 0.0, 0.0)
         volume = width * height * depth
-        
+
+        # Calculate bounding box center from bbox_min and bbox_max if provided
+        bbox_min = properties.get('bbox_min', [0.0, 0.0, 0.0])
+        bbox_max = properties.get('bbox_max', [0.0, 0.0, 0.0])
+        bbox_center_x = (bbox_min[0] + bbox_max[0]) / 2 if len(bbox_min) >= 3 and len(bbox_max) >= 3 else 0.0
+        bbox_center_y = (bbox_min[1] + bbox_max[1]) / 2 if len(bbox_min) >= 3 and len(bbox_max) >= 3 else 0.0
+        bbox_center_z = (bbox_min[2] + bbox_max[2]) / 2 if len(bbox_min) >= 3 and len(bbox_max) >= 3 else 0.0
+
         complexity_score = properties.get('complexity_score', 0.0)
         quality_tier = properties.get('quality_tier', 'medium')
         estimated_load_time = properties.get('estimated_load_time', 0.0)
         memory_estimate = properties.get('memory_estimate', 0.0)
         primary_style = properties.get('primary_style')
         size_category = properties.get('size_category', 'medium')
-        
+
         subcategory = properties.get('subcategory')
         collection_name = properties.get('collection_name')
+        object_name = properties.get('object_name')
         file_path = properties.get('file_path', '')
-        
+
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 INSERT INTO assets (
-                    name, pack_id, category, subcategory, file_path, collection_name, 
-                    blend_file_path, polygon_count, vertex_count, material_count, 
-                    object_count, width, height, depth, volume, complexity_score, 
-                    quality_tier, estimated_load_time, memory_estimate, primary_style, 
-                    size_category, scan_status, last_scanned
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?)
+                    name, pack_id, category, subcategory, file_path, collection_name, object_name,
+                    blend_file_path, polygon_count, vertex_count, material_count,
+                    object_count, width, height, depth, volume,
+                    bbox_center_x, bbox_center_y, bbox_center_z,
+                    complexity_score, quality_tier, estimated_load_time, memory_estimate,
+                    primary_style, size_category, scan_status, last_scanned
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?)
             """, (
-                name, pack_id, category, subcategory, file_path, collection_name,
+                name, pack_id, category, subcategory, file_path, collection_name, object_name,
                 blend_file_path, polygon_count, vertex_count, material_count,
-                object_count, width, height, depth, volume, complexity_score,
-                quality_tier, estimated_load_time, memory_estimate, primary_style,
-                size_category, datetime.now()
+                object_count, width, height, depth, volume,
+                bbox_center_x, bbox_center_y, bbox_center_z,
+                complexity_score, quality_tier, estimated_load_time, memory_estimate,
+                primary_style, size_category, datetime.now()
             ))
             conn.commit()
             return cursor.lastrowid
@@ -668,7 +768,46 @@ def get_database() -> AssetDatabase:
         _db_instance = AssetDatabase()
     return _db_instance
 
-def reset_database():
-    """Reset the global database instance (for testing)."""
+def delete_database_file(db_path: str = None) -> bool:
+    """
+    Physically delete the database file from disk.
+
+    Args:
+        db_path: Path to database file. If None, uses default location.
+
+    Returns:
+        True if file was deleted, False if file didn't exist or couldn't be deleted.
+    """
+    if db_path is None:
+        config_path = bpy.utils.user_resource('CONFIG')
+        db_path = os.path.join(config_path, "bms_asset_intelligence.db")
+
+    try:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+            logger.info(f"Deleted database file: {db_path}")
+            return True
+        else:
+            logger.info(f"Database file does not exist: {db_path}")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to delete database file: {e}")
+        return False
+
+
+def reset_database(delete_file: bool = False):
+    """
+    Reset the global database instance.
+
+    Args:
+        delete_file: If True, also deletes the database file from disk.
+                    This forces a complete schema recreation on next access.
+    """
     global _db_instance
-    _db_instance = None
+
+    if delete_file and _db_instance is not None:
+        db_path = _db_instance.db_path
+        _db_instance = None
+        delete_database_file(db_path)
+    else:
+        _db_instance = None
